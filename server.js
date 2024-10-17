@@ -1,108 +1,207 @@
+require("dotenv").config();
 const express = require("express");
+const mysql = require("mysql2");
 const bcrypt = require("bcryptjs");
 const cors = require("cors");
 
 const app = express();
-const PORT = process.env.PORT || 3306;
+const PORT = process.env.PORT || 3000;
 
-app.use(express.json());
 app.use(cors());
+app.use(express.json());
 
-// Finto database (array di utenti)
-let users = [];
+// Configura la connessione al database MySQL (usando le impostazioni di MAMP)
+const db = mysql.createConnection({
+  host: "localhost",
+  user: "root", // Questo è l'utente di default di MAMP
+  password: "root", // Password di default di MAMP
+  database: "pokemon_db",
+  port: 8889, // Porta di default per MySQL su MAMP
+});
 
-// Funzione per generare ID univoco
-const generateUserId = () => {
-  return users.length ? users[users.length - 1].id + 1 : 1;
+// Connetti al database
+db.connect((err) => {
+  if (err) {
+    console.error("Errore di connessione al database:", err);
+  } else {
+    console.log("Connesso al database MySQL");
+    console.log("Server in ascolto sulla porta", PORT);
+  }
+});
+
+// Funzione per registrare eventi di log nel database
+const logEvent = (userId, event, description) => {
+  const timestamp = new Date().toISOString().slice(0, 19).replace('T', ' ');
+  db.query(
+    "INSERT INTO logs (user_id, event, description, timestamp) VALUES (?, ?, ?, ?)",
+    [userId, event, description, timestamp],
+    (err) => {
+      if (err) {
+        console.error("Errore durante il logging dell'evento:", err);
+      }
+    }
+  );
 };
 
-// Rotta POST: Registrazione di un nuovo utente
+// Rotta per la registrazione degli utenti
 app.post("/register", async (req, res) => {
   const { username, email, password } = req.body;
 
-  console.log("Richiesta di registrazione ricevuta con i seguenti dati:");
-  console.log(`Username: ${username}, Email: ${email}, Password: [Nascosta per sicurezza]`);
+  // Controllo se l'utente esiste già
+  db.query("SELECT * FROM users WHERE email = ?", [email], async (err, results) => {
+    if (err) {
+      console.error("Errore durante la verifica dell'utente:", err);
+      logEvent(null, "Errore Registrazione", `Errore durante la verifica dell'utente: ${err.message}`);
+      return res.status(500).json({ message: "Errore del server" });
+    }
+    if (results.length > 0) {
+      logEvent(null, "Tentativo di Registrazione Fallito", `Email già registrata: ${email}`);
+      return res.status(400).json({ message: "Email già registrata" });
+    }
 
-  // Controlla se esiste già un utente con lo stesso username o email
-  const existingUser = users.find(
-    (user) => user.username === username || user.email === email
-  );
-  if (existingUser) {
-    console.log("Registrazione fallita: Utente o email già esistenti");
-    return res.status(400).json({ message: "Utente o email già esistenti" });
-  }
-
-  // Hash della password
-  try {
+    // Hash della password
     const salt = await bcrypt.genSalt(10);
     const hashedPassword = await bcrypt.hash(password, salt);
 
-    // Crea un nuovo utente
-    const newUser = {
-      id: generateUserId(),
-      username,
-      email,
-      password: hashedPassword,
-    };
+    // Ottieni la data di registrazione corrente
+    const registrationDate = new Date().toISOString().slice(0, 19).replace('T', ' ');
 
-    // Aggiungi il nuovo utente al "database"
-    users.push(newUser);
-
-    console.log("Nuovo utente registrato con successo:");
-    console.log(`ID: ${newUser.id}, Username: ${newUser.username}, Email: ${newUser.email}`);
-
-    res.status(201).json({ message: "Registrazione completata" });
-  } catch (error) {
-    console.log("Errore durante la registrazione:", error);
-    res.status(500).json({ message: "Errore nella registrazione" });
-  }
-});
-
-// Rotta POST: Login utente
-app.post("/login", async (req, res) => {
-  const { email, password } = req.body;
-
-  console.log("Richiesta di login ricevuta per l'email:", email);
-
-  // Cerca l'utente in base all'email
-  const user = users.find((user) => user.email === email);
-  if (!user) {
-    console.log("Login fallito: Email non trovata");
-    return res.status(400).json({ message: "Email non trovata" });
-  }
-
-  // Confronta la password inserita con quella hashata
-  const isMatch = await bcrypt.compare(password, user.password);
-  if (!isMatch) {
-    console.log("Login fallito: Password errata");
-    return res.status(400).json({ message: "Password errata" });
-  }
-
-  console.log("Login riuscito per l'utente:");
-  console.log(`ID: ${user.id}, Username: ${user.username}, Email: ${user.email}`);
-
-  // Se tutto è corretto, ritorna le informazioni dell'utente
-  res.status(200).json({
-    message: "Login riuscito",
-    user: {
-      id: user.id,
-      username: user.username,
-      email: user.email,
-    },
+    // Inserisci il nuovo utente nel database
+    db.query(
+      "INSERT INTO users (username, email, password, registrationDate) VALUES (?, ?, ?, ?)",
+      [username, email, hashedPassword, registrationDate],
+      (err, result) => {
+        if (err) {
+          console.error("Errore durante la registrazione:", err);
+          logEvent(null, "Errore Registrazione", `Errore durante la registrazione: ${err.message}`);
+          return res.status(500).json({ message: "Errore del server" });
+        }
+        const userId = result.insertId;
+        logEvent(userId, "Registrazione", `L'utente ${username} si è registrato con successo.`);
+        res.status(201).json({ message: "Registrazione completata" });
+      }
+    );
   });
 });
 
-// Rotta GET: Ottieni informazioni su tutti gli utenti
-app.get("/users", (req, res) => {
-  const userList = users.map((user) => ({
-    id: user.id,
-    username: user.username,
-    email: user.email,
-  }));
-  res.json(userList); // Ritorna la lista degli utenti senza la password
+// Rotta per il login degli utenti
+app.post("/login", (req, res) => {
+  const { email, password } = req.body;
+
+  db.query("SELECT * FROM users WHERE email = ?", [email], async (err, results) => {
+    if (err) {
+      console.error("Errore durante il login:", err);
+      logEvent(null, "Errore Login", `Errore durante il login: ${err.message}`);
+      return res.status(500).json({ message: "Errore del server" });
+    }
+
+    if (results.length === 0) {
+      logEvent(null, "Tentativo di Login Fallito", `Email non trovata: ${email}`);
+      return res.status(400).json({ message: "Email non trovata" });
+    }
+
+    const user = results[0];
+
+    // Verifica la password
+    const isMatch = await bcrypt.compare(password, user.password);
+    if (!isMatch) {
+      logEvent(user.id, "Tentativo di Login Fallito", "Password errata.");
+      return res.status(400).json({ message: "Password errata" });
+    }
+
+    logEvent(user.id, "Login", `L'utente ${user.username} ha effettuato l'accesso con successo.`);
+    res.status(200).json({
+      message: "Login riuscito",
+      user: {
+        id: user.id,
+        username: user.username,
+        email: user.email,
+        registrationDate: user.registrationDate,
+      },
+    });
+  });
 });
 
-// Avvia il server
+// Rotta PUT: Aggiorna il profilo utente
+app.put("/updateProfile/:id", async (req, res) => {
+  const { id } = req.params;
+  const { username, oldPassword, newPassword } = req.body;
+
+  // Cerca l'utente per ID
+  db.query("SELECT * FROM users WHERE id = ?", [id], async (err, results) => {
+    if (err) {
+      console.error("Errore durante la verifica dell'utente:", err);
+      logEvent(id, "Errore Aggiornamento Profilo", `Errore durante la verifica dell'utente: ${err.message}`);
+      return res.status(500).json({ message: "Errore del server" });
+    }
+
+    if (results.length === 0) {
+      logEvent(id, "Aggiornamento Profilo Fallito", "Utente non trovato.");
+      return res.status(404).json({ message: "Utente non trovato" });
+    }
+
+    const user = results[0];
+
+    // Verifica la vecchia password
+    const isMatch = await bcrypt.compare(oldPassword, user.password);
+    if (!isMatch) {
+      logEvent(id, "Aggiornamento Profilo Fallito", "Vecchia password errata.");
+      return res.status(400).json({ message: "Vecchia password errata" });
+    }
+
+    // Hash della nuova password (se presente)
+    let updatedPassword = user.password;
+    if (newPassword) {
+      const salt = await bcrypt.genSalt(10);
+      updatedPassword = await bcrypt.hash(newPassword, salt);
+    }
+
+    // Aggiorna i dati dell'utente
+    db.query(
+      "UPDATE users SET username = ?, password = ? WHERE id = ?",
+      [username, updatedPassword, id],
+      (err, result) => {
+        if (err) {
+          console.error("Errore durante l'aggiornamento del profilo:", err);
+          logEvent(id, "Errore Aggiornamento Profilo", `Errore durante l'aggiornamento del profilo: ${err.message}`);
+          return res.status(500).json({ message: "Errore durante l'aggiornamento del profilo" });
+        }
+        logEvent(id, "Aggiornamento Profilo", `Il profilo dell'utente ${username} è stato aggiornato.`);
+        res.status(200).json({ message: "Profilo aggiornato con successo" });
+      }
+    );
+  });
+});
+
+// Rotta DELETE: Elimina l'account dell'utente
+app.delete("/deleteAccount/:id", (req, res) => {
+  const userId = req.params.id;
+
+  db.query("SELECT * FROM users WHERE id = ?", [userId], (err, results) => {
+    if (err) {
+      console.error("Errore durante la verifica dell'utente:", err);
+      logEvent(userId, "Errore Eliminazione Account", `Errore durante la verifica dell'utente: ${err.message}`);
+      return res.status(500).json({ message: "Errore del server" });
+    }
+
+    if (results.length === 0) {
+      logEvent(userId, "Eliminazione Account Fallita", "ID utente non trovato.");
+      return res.status(404).json({ message: "ID utente non trovato" });
+    }
+
+    db.query("DELETE FROM users WHERE id = ?", [userId], (err) => {
+      if (err) {
+        console.error("Errore durante l'eliminazione dell'account:", err);
+        logEvent(userId, "Errore Eliminazione Account", `Errore durante l'eliminazione dell'account: ${err.message}`);
+        return res.status(500).json({ message: "Errore del server" });
+      }
+      logEvent(userId, "Eliminazione Account", `L'account dell'utente con ID ${userId} è stato eliminato.`);
+      res.status(200).json({ message: "Account eliminato con successo" });
+    });
+  });
+});
+
+// Avvio del server
 app.listen(PORT, () => {
   console.log(`Server avviato sulla porta ${PORT}`);
 });
